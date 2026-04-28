@@ -5,14 +5,14 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "agent-orchestrator"
 version = "1.0.0"
-description = "Multi-Agent Orchestration System for Laravel Development with Telegram Remote Control"
+description = "Multi-Agent Orchestration System for Software Development with Hierarchical Team Management"
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.10"
 authors = [
     {name = "Agent Orchestrator Team", email = "contact@agentorchestrator.com"}
 ]
-keywords = ["ai", "agents", "laravel", "automation", "telegram", "crewai", "code-generation"]
+keywords = ["ai", "agents", "automation", "telegram", "crewai", "code-generation", "multi-agent", "orchestration"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
@@ -58,10 +58,7 @@ Repository = "https://github.com/agentorchestrator/agent-orchestrator"
 "Bug Tracker" = "https://github.com/agentorchestrator/agent-orchestrator/issues"
 
 [tool.setuptools]
-packages = ["agents", "api", "config", "core", "dashboard", "remote", "tasks"]
-
-[tool.setuptools.package-data]
-dashboard = ["*.html"]
+packages = ["agents", "api", "cli", "config", "core", "remote", "skills"]
 
 [tool.black]
 line-length = 88

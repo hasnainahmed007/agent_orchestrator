@@ -12,7 +12,12 @@ class Config:
     
     # Paths
     BASE_DIR = Path(__file__).parent.parent
-    PROJECT_PATH = Path(os.getenv('PROJECT_PATH', r'C:\xampp\htdocs\Office\glamdemy_admin_panel'))
+    
+    # Project settings (generic - not tied to Laravel)
+    PROJECT_PATH = Path(os.getenv('PROJECT_PATH', str(BASE_DIR / 'projects' / 'default')))
+    PROJECT_NAME = os.getenv('PROJECT_NAME', 'default-project')
+    PROJECT_TYPE = os.getenv('PROJECT_TYPE', 'generic')
+    MAIN_BRANCH = os.getenv('MAIN_BRANCH', 'main')
     
     # OpenAI
     OPENAI_API_KEY = os.getenv('OPENAI_API_KEY', '')
@@ -28,15 +33,15 @@ class Config:
         if uid.strip()
     ]
     
-    # Project
-    PROJECT_NAME = os.getenv('PROJECT_NAME', 'glamdemy_admin_panel')
-    PROJECT_TYPE = os.getenv('PROJECT_TYPE', 'laravel')
-    MAIN_BRANCH = os.getenv('MAIN_BRANCH', 'main')
-    
-    # Agent
+    # Agent settings
     AGENT_VERBOSE = os.getenv('AGENT_VERBOSE', 'true').lower() == 'true'
     AGENT_MAX_ITERATIONS = int(os.getenv('AGENT_MAX_ITERATIONS', '15'))
     AGENT_MEMORY = os.getenv('AGENT_MEMORY', 'true').lower() == 'true'
+    
+    # Multi-agent team settings
+    DEFAULT_TEAM_CONFIG = os.getenv('DEFAULT_TEAM_CONFIG', 'default')
+    ENABLE_AUTO_ASSIGN = os.getenv('ENABLE_AUTO_ASSIGN', 'true').lower() == 'true'
+    ENABLE_HIERARCHICAL_DELEGATION = os.getenv('ENABLE_HIERARCHICAL_DELEGATION', 'true').lower() == 'true'
     
     # Safety
     REQUIRE_APPROVAL = os.getenv('REQUIRE_APPROVAL', 'true').lower() == 'true'
@@ -56,6 +61,9 @@ class Config:
     STATE_FILE = BASE_DIR / os.getenv('STATE_FILE', 'state/orchestrator_state.json')
     TASKS_FILE = BASE_DIR / os.getenv('TASKS_FILE', 'state/tasks.json')
     
+    # Skills
+    CUSTOM_SKILLS_DIR = BASE_DIR / os.getenv('CUSTOM_SKILLS_DIR', 'skills/custom')
+    
     @classmethod
     def validate(cls):
         """Validate required configuration."""
@@ -65,18 +73,59 @@ class Config:
             errors.append("OPENAI_API_KEY is required. Set it in .env file.")
         
         if not cls.TELEGRAM_BOT_TOKEN or cls.TELEGRAM_BOT_TOKEN == 'your_telegram_bot_token_here':
-            errors.append("TELEGRAM_BOT_TOKEN is required. Set it in .env file.")
+            errors.append("TELEGRAM_BOT_TOKEN is required for Telegram mode. Set it in .env file.")
         
-        if not cls.TELEGRAM_ALLOWED_USERS:
-            errors.append("TELEGRAM_ALLOWED_USERS is required for security.")
+        # Make project path if it doesn't exist (for generic projects)
+        cls.PROJECT_PATH.mkdir(parents=True, exist_ok=True)
         
-        if not cls.PROJECT_PATH.exists():
-            errors.append(f"PROJECT_PATH does not exist: {cls.PROJECT_PATH}")
+        # Check if it's a git repo
+        git_dir = cls.PROJECT_PATH / '.git'
+        if not git_dir.exists():
+            errors.append(f"PROJECT_PATH is not a git repository: {cls.PROJECT_PATH}")
         
         return errors
     
     @classmethod
     def ensure_directories(cls):
         """Ensure required directories exist."""
-        for dir_path in [cls.BASE_DIR / 'logs', cls.BASE_DIR / 'state']:
-            dir_path.mkdir(exist_ok=True)
+        for dir_path in [
+            cls.BASE_DIR / 'logs',
+            cls.BASE_DIR / 'state',
+            cls.BASE_DIR / 'skills' / 'custom',
+            cls.PROJECT_PATH
+        ]:
+            dir_path.mkdir(parents=True, exist_ok=True)
+    
+    @classmethod
+    def get_project_validation_config(cls) -> dict:
+        """Get validation configuration based on project type."""
+        configs = {
+            'laravel': {
+                'php_enabled': True,
+                'blade_enabled': True,
+                'artisan_enabled': True,
+                'test_command': 'php artisan test',
+            },
+            'python': {
+                'php_enabled': False,
+                'blade_enabled': False,
+                'artisan_enabled': False,
+                'test_command': 'pytest',
+                'lint_command': 'python -m py_compile',
+            },
+            'node': {
+                'php_enabled': False,
+                'blade_enabled': False,
+                'artisan_enabled': False,
+                'test_command': 'npm test',
+                'lint_command': 'npm run lint',
+            },
+            'generic': {
+                'php_enabled': False,
+                'blade_enabled': False,
+                'artisan_enabled': False,
+                'test_command': '',
+                'lint_command': '',
+            }
+        }
+        return configs.get(cls.PROJECT_TYPE, configs['generic'])
