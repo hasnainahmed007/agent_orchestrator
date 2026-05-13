@@ -4,6 +4,7 @@ import sys
 import logging
 import asyncio
 import argparse
+from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict, List, Any
 
@@ -19,6 +20,9 @@ from core.git_manager import GitManager
 from core.project_context import ProjectContextScanner
 from core.validator import Validator
 from core.state_manager import StateManager
+from core.cost_tracker import CostTracker
+from core.rate_limiter import RateLimiter, TokenQuotaManager
+from core.performance_tracker import PerformanceTracker
 from agents import AgentManager
 
 
@@ -41,39 +45,48 @@ class Orchestrator:
     
     def __init__(self):
         logger.info("Initializing Agent Orchestrator...")
-        
+
         # Validate configuration
-        errors = Config.validate()
+        errors, warnings = Config.validate()
+        if warnings:
+            for warning in warnings:
+                logger.warning(f"  - {warning}")
         if errors:
             logger.error("Configuration errors:")
             for error in errors:
                 logger.error(f"  - {error}")
             raise ValueError("Configuration validation failed")
-        
+
         Config.ensure_directories()
-        
+
         # Initialize skill registry
         self.skill_registry = get_skill_registry(Config.CUSTOM_SKILLS_DIR)
-        
+
         # Initialize role manager
         self.role_manager = AgentRoleManager(Config.STATE_FILE.parent)
-        
+
         # Initialize delegation engine
         self.delegation = TaskDelegationEngine(Config.STATE_FILE.parent, self.role_manager)
         self._setup_delegation_callbacks()
-        
-        # Initialize legacy components
+
+        # Initialize core components
         self.git = GitManager(Config.PROJECT_PATH, Config.MAIN_BRANCH)
-        self.validator = Validator(Config.PROJECT_PATH)
+        self.validator = Validator(Config.PROJECT_PATH, Config.PROJECT_TYPE)
         self.state = StateManager(Config.STATE_FILE, Config.TASKS_FILE)
-        self.project_scanner = ProjectContextScanner(Config.PROJECT_PATH)
-        
+        self.project_scanner = ProjectContextScanner(Config.PROJECT_PATH, Config.PROJECT_TYPE)
+
         # Agent manager (for CrewAI execution)
         self.agent_manager = AgentManager(Config.PROJECT_PATH)
-        
+
+        # Cost control and monitoring
+        self.cost_tracker = CostTracker(Config.STATE_FILE.parent, Config.DAILY_BUDGET_LIMIT)
+        self.rate_limiter = RateLimiter(Config.STATE_FILE.parent)
+        self.quota_manager = TokenQuotaManager(Config.STATE_FILE.parent)
+        self.perf_tracker = PerformanceTracker(Config.STATE_FILE.parent)
+
         # Telegram bot (initialized later)
         self.telegram: Optional[Any] = None
-        
+
         logger.info("Orchestrator initialized successfully")
         logger.info(f"Loaded {len(self.role_manager.roles)} roles, {len(self.role_manager.instances)} agents")
     
@@ -215,6 +228,20 @@ class Orchestrator:
         self.state.update_task_status(task_id, "running")
         
         try:
+            # Rate limiting check
+            limit_status = self.rate_limiter.check_rate_limit()
+            if limit_status.is_limited:
+                wait_time = limit_status.retry_after
+                logger.info(f"Rate limited, waiting {wait_time:.1f}s")
+                await asyncio.sleep(wait_time)
+
+            # Record task start
+            self.perf_tracker.record_task_start(
+                task_id=task_id,
+                description=task.description,
+                agents=[agent_instance.name]
+            )
+
             # Check if agent should delegate
             if role.can_create_subtasks and Config.ENABLE_HIERARCHICAL_DELEGATION:
                 # Analyze if task needs delegation
@@ -222,10 +249,10 @@ class Orchestrator:
                 if subtasks:
                     logger.info(f"Task {task_id} delegated into {len(subtasks)} subtasks")
                     return True
-            
+
             # Execute directly with CrewAI
             logger.info(f"Executing task {task_id} with agent {agent_instance.name}")
-            
+
             # Create CrewAI agent
             crew_agent = self.agent_manager.create_dynamic_agent(
                 name=agent_instance.name,
@@ -234,14 +261,24 @@ class Orchestrator:
                 backstory=system_prompt,
                 tools=role.get_allowed_tools(self.skill_registry)
             )
-            
+
             # Execute
             result = self.agent_manager.execute_agent_task(
                 crew_agent,
                 task_prompt,
                 project_context
             )
-            
+
+            # Track cost
+            estimated_tokens = (len(system_prompt) + len(task_prompt) + len(str(result))) // 4
+            self.cost_tracker.record_usage(
+                model=Config.OPENAI_MODEL,
+                prompt_tokens=len(system_prompt) // 4,
+                completion_tokens=len(str(result)) // 4,
+                agent_name=agent_instance.name,
+                task_id=task_id
+            )
+
             # Update task
             task.result_summary = str(result)[:5000]
             task.status = "completed"
@@ -250,10 +287,12 @@ class Orchestrator:
             # Get changed files
             changed_files = self.git.get_changed_files(task.branch_name)
             task.deliverables = changed_files
-            
+            validation_ok = True
+
             # Validate if files changed
             if changed_files:
                 validation = self.validator.validate_all(changed_files)
+                validation_ok = validation.success
                 if not validation.success and Config.ENABLE_ROLLBACK:
                     logger.error(f"Validation failed for task {task_id}")
                     self.git.rollback_branch(task.branch_name)
@@ -280,9 +319,22 @@ class Orchestrator:
             
             self.delegation._save()
             self.state.update_task_status(task_id, task.status)
-            
+
+            # Record performance
+            self.perf_tracker.record_task_complete(
+                task_id=task_id,
+                success=task.status not in ("failed", "rejected"),
+                files_created=len([f for f in task.deliverables if (self.git.project_path / f).exists()]) if task.deliverables else 0,
+                files_modified=len(task.deliverables) if task.deliverables else 0,
+                tokens_used=estimated_tokens,
+                cost=0.0,
+                validation_passed=validation_ok,
+                approved=(task.status == "completed")
+            )
+            self.rate_limiter.record_request()
+
             return True
-            
+
         except Exception as e:
             logger.exception(f"Error processing task {task_id}: {e}")
             task.status = "failed"
@@ -295,6 +347,16 @@ class Orchestrator:
             )
             self.delegation._save()
             self.state.update_task_status(task_id, "failed", str(e))
+
+            # Record failure performance
+            self.perf_tracker.record_task_complete(
+                task_id=task_id,
+                success=False,
+                tokens_used=len(system_prompt) // 4 if 'system_prompt' in dir() else 0,
+                cost=0.0,
+                validation_passed=False,
+                approved=False
+            )
             return False
     
     async def _analyze_and_delegate(self, task: DelegatedTask,
@@ -378,7 +440,13 @@ class Orchestrator:
             'tasks': self.delegation.get_stats(),
             'project': Config.PROJECT_NAME,
             'project_type': Config.PROJECT_TYPE,
-            'skills_loaded': len(self.skill_registry.skills)
+            'skills_loaded': len(self.skill_registry.skills),
+            'costs': {
+                'today': self.cost_tracker.get_remaining_budget(),
+                'budget': Config.DAILY_BUDGET_LIMIT
+            },
+            'rate_limits': self.rate_limiter.get_status(),
+            'performance': self.perf_tracker.get_system_summary()
         }
     
     def get_task_status(self, task_id: str) -> Optional[Dict]:

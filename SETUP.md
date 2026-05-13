@@ -36,10 +36,10 @@ Agent Orchestrator allows you to:
 ## System Requirements
 
 - **Python**: 3.10 or higher
-- **Git**: Required for the target project directory
+- **Git**: Required (auto-initialized in project directory if missing)
 - **Operating System**: Linux, macOS, or Windows
 - **OpenAI API Key**: Required for AI agent execution
-- **Telegram Bot Token**: Optional (only if using Telegram mode)
+- **Telegram Bot Token**: Optional (needed only for Telegram mode)
 
 ---
 
@@ -62,14 +62,19 @@ cp .env.example .env
 
 ### 3. Prepare Your Project Directory
 
+The orchestrator auto-initializes a git repository in the project path. Just set `PROJECT_PATH` in `.env`:
+
 ```bash
-# Create or use an existing project directory
-mkdir -p projects/my-project
-cd projects/my-project
-git init
-git checkout -b main
-cd ../..
+# Default path (works out of the box):
+PROJECT_PATH=/path/to/agent_orchestrator/projects/default
+
+# Or point to your existing project:
+PROJECT_PATH=/home/user/projects/my-app
 ```
+
+If the directory is not a git repo, the orchestrator will auto-initialize it on first run.
+
+**Important:** Make sure `MAIN_BRANCH` matches your existing branch if using a pre-existing repo (`main` by default).
 
 ### 4. Run the CLI
 
@@ -131,7 +136,7 @@ Edit `.env` with your settings:
 | Variable | Description | Example |
 |---|---|---|
 | `OPENAI_API_KEY` | Your OpenAI API key | `sk-...` |
-| `PROJECT_PATH` | Path to your project (must be a git repo) | `/home/user/projects/my-app` |
+| `PROJECT_PATH` | Path to your project (auto-initialized as git repo) | `/home/user/projects/my-app` |
 | `PROJECT_NAME` | Name of your project | `my-app` |
 | `PROJECT_TYPE` | Type of project | `generic`, `python`, `node`, `laravel` |
 | `MAIN_BRANCH` | Main git branch name | `main` |
@@ -140,9 +145,10 @@ Edit `.env` with your settings:
 
 | Variable | Description | Default |
 |---|---|---|
-| `TELEGRAM_BOT_TOKEN` | From @BotFather | (empty) |
-| `TELEGRAM_ALLOWED_USERS` | Comma-separated user IDs | (empty) |
+| `TELEGRAM_BOT_TOKEN` | From @BotFather (CLI works without it) | (empty) |
+| `TELEGRAM_ALLOWED_USERS` | Comma-separated user IDs for auth | (empty) |
 | `OPENAI_MODEL` | Model to use | `gpt-4o` |
+| `OPENAI_BASE_URL` | Custom API endpoint (OpenRouter, Moonshot, proxy, etc.) | `https://api.openai.com/v1` |
 | `REQUIRE_APPROVAL` | Require approval before merge | `true` |
 | `DAILY_BUDGET_LIMIT` | Max daily API cost ($) | `5.0` |
 | `ENABLE_AUTO_ASSIGN` | Auto-assign tasks to agents | `true` |
@@ -150,20 +156,18 @@ Edit `.env` with your settings:
 
 ### Step 3: Prepare Your Project
 
-The target project **must be a git repository**:
+The orchestrator will auto-initialize a git repository in `PROJECT_PATH` if one doesn't exist:
 
 ```bash
-# If starting fresh
+# If starting fresh - just point to an existing or new directory
 mkdir my-project
-cd my-project
-git init
-echo "# My Project" > README.md
-git add README.md
-git commit -m "Initial commit"
-git branch -m main  # or master, depending on your preference
+# Update PROJECT_PATH in .env to point here
+# The orchestrator auto-inits git on first run
 ```
 
-Update `PROJECT_PATH` in `.env` to point to this directory.
+If you have an existing project with a non-main default branch (e.g., `master`), set `MAIN_BRANCH=master` in `.env`.
+
+Update `PROJECT_PATH` in `.env` to point to your project directory.
 
 ### Step 4: Run the System
 
@@ -188,14 +192,16 @@ python main.py --status
 
 ### Project Types
 
-The `PROJECT_TYPE` setting affects validation:
+The `PROJECT_TYPE` setting controls project scanning, validation, and context detection:
 
-| Type | Validation Behavior |
-|---|---|
-| `generic` | Basic file checks only |
-| `python` | Python syntax check (`py_compile`), pytest |
-| `node` | ESLint, `npm test` |
-| `laravel` | PHP syntax, Blade checks, `php artisan test` |
+| Type | Language | Validation | Test Command |
+|---|---|---|---|
+| `generic` | Auto-detected | File existence check | None |
+| `python` | Python | `py_compile` syntax | `pytest` |
+| `node` | JavaScript/TypeScript | `npm run lint` | `npm test` |
+| `laravel` | PHP | PHP syntax, Blade check | `php artisan test` |
+
+The project context scanner auto-detects framework (Django, FastAPI, React, Vue, Laravel, etc.) based on file patterns in the project directory.
 
 ### Agent Settings
 
@@ -213,6 +219,16 @@ The `PROJECT_TYPE` setting affects validation:
 | `REQUIRE_APPROVAL` | Human approval before merging |
 | `ENABLE_ROLLBACK` | Auto-rollback on validation failure |
 | `AUTO_MERGE_ON_TESTS_PASS` | Auto-merge if tests pass |
+
+### Cost Control & Monitoring
+
+The orchestrator now tracks API costs, rate limits, and agent performance automatically:
+
+- **Cost tracking**: Daily budget enforcement via `DAILY_BUDGET_LIMIT`
+- **Rate limiting**: Prevents API quota exhaustion
+- **Performance metrics**: Per-agent and per-task statistics
+
+View all metrics: `python main.py --status`
 
 ---
 
@@ -469,17 +485,6 @@ role_manager.create_role(role)
 
 ## Troubleshooting
 
-### "PROJECT_PATH is not a git repository"
-
-Your project directory must be a git repository:
-```bash
-cd /your/project/path
-git init
-git checkout -b main
-git add .
-git commit -m "Initial commit"
-```
-
 ### "OPENAI_API_KEY is required"
 
 Add your OpenAI API key to `.env`:
@@ -489,10 +494,17 @@ OPENAI_API_KEY=sk-your-key-here
 
 ### "Telegram bot token not configured"
 
-Add your bot token to `.env` or use CLI mode instead:
+Telegram bot token is optional for CLI mode. If you only use CLI, ignore this warning. Add token to `.env` for Telegram mode:
 ```bash
-python main.py --mode cli
+python main.py --mode cli   # No token needed
 ```
+
+### "Failed to initialize git repository"
+
+The orchestrator tried to auto-init git in `PROJECT_PATH` but failed. Check:
+- The path is writable
+- Git is installed (`git --version`)
+- No permission issues in the parent directory
 
 ### Agents not auto-assigning
 
@@ -511,7 +523,7 @@ tail -f logs/orchestrator.log
 Common causes:
 - OpenAI API key invalid or quota exceeded
 - Project path doesn't exist
-- Git repository not initialized
+- Rate limit reached (check `python main.py --status`)
 
 ---
 
@@ -551,8 +563,6 @@ agent_orchestrator/
 │   └── registry.py
 ├── api/                 # REST API server
 │   └── server.py
-├── tasks/               # Legacy task definitions
-│   └── definitions.py
 ├── projects/            # Target projects (created by user)
 │   └── default/
 ├── logs/                # Log files

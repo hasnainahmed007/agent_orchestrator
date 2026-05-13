@@ -120,13 +120,21 @@ class OrchestratorAPI:
             """Submit a new task."""
             if not self.orchestrator:
                 raise HTTPException(status_code=503, detail="Orchestrator not initialized")
-            
+
             try:
-                task_id = await self.orchestrator.process_task(request.description)
-                
+                title = request.description.split('\n')[0][:50]
+                task = await self.orchestrator.submit_task(
+                    title=title,
+                    description=request.description,
+                    priority=getattr(request, 'priority', 'normal')
+                )
+
+                # Process in background
+                asyncio.create_task(self.orchestrator.process_task_with_agent(task.task_id))
+
                 return TaskResponse(
-                    task_id=task_id,
-                    status="pending",
+                    task_id=task.task_id,
+                    status=task.status.value if hasattr(task.status, 'value') else str(task.status),
                     description=request.description,
                     created_at=datetime.now().isoformat()
                 )

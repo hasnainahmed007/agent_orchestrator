@@ -221,6 +221,52 @@ class AgentTools:
     def clear_touched_files(self):
         """Clear the list of touched files."""
         self.files_touched = []
+    
+    def get_crewai_tools(self) -> list:
+        """Return CrewAI BaseTool instances wrapping agent methods."""
+        from crewai.tools import tool
+        
+        tools_instance = self
+        
+        @tool("read_file")
+        def _read_file(file_path: str) -> str:
+            """Read contents of a file from the project. file_path: relative path from project root."""
+            return tools_instance.read_file(file_path)
+        
+        @tool("write_file")
+        def _write_file(file_path: str, content: str) -> str:
+            """Write content to a file (creates if not exists). file_path: relative path. content: text to write."""
+            return tools_instance.write_file(file_path, content)
+        
+        @tool("edit_file")
+        def _edit_file(file_path: str, old_string: str, new_string: str) -> str:
+            """Edit a specific part of a file. file_path: relative path. old_string: text to find. new_string: replacement text."""
+            return tools_instance.edit_file(file_path, old_string, new_string)
+        
+        @tool("search_files")
+        def _search_files(pattern: str, directory: str = "") -> list:
+            """Search for files matching a glob pattern. pattern: e.g. '*.py'. directory: subdirectory to search (optional)."""
+            return tools_instance.search_files(pattern, directory)
+        
+        @tool("list_directory")
+        def _list_directory(directory: str = "") -> str:
+            """List contents of a directory. directory: relative directory path (optional)."""
+            return tools_instance.list_directory(directory)
+        
+        @tool("run_command")
+        def _run_command(command: str) -> str:
+            """Run a shell command in the project directory. command: the shell command to execute."""
+            return tools_instance.run_command(command)
+        
+        @tool("get_project_structure")
+        def _get_project_structure() -> str:
+            """Get a summary of the project directory structure."""
+            return tools_instance.get_project_structure()
+        
+        return [
+            _read_file, _write_file, _edit_file, _search_files,
+            _list_directory, _run_command, _get_project_structure
+        ]
 
 
 def create_tools(project_path: Path) -> AgentTools:
