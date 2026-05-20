@@ -1,6 +1,7 @@
 """Interactive CLI interface for Agent Orchestrator."""
 import asyncio
 import json
+from pathlib import Path
 from typing import Optional
 from datetime import datetime
 
@@ -73,7 +74,12 @@ TASK MANAGEMENT:
 SYSTEM:
   status                Show system status
   skills                List available skills
+  templates             List task templates
+  template <id>         Show template details
   scan                  Scan project context
+  export-team <file>    Export team to YAML
+  import-team <file>    Import team from YAML
+  dry-run <id>          Preview task without writing files
   exit                  Exit the CLI
 """)
     
@@ -495,15 +501,132 @@ SYSTEM:
             if context:
                 print(f"\nProject: {context.project_name}")
                 print(f"Type: {context.project_type}")
-                print(f"Laravel Version: {context.laravel_version}")
-                print(f"PHP Version: {context.php_version}")
-                print(f"Services: {len(context.services)}")
-                print(f"Models: {len(context.models)}")
-                print(f"Controllers: {len(context.controllers)}")
-                print(f"Views: {len(context.views)}")
-                print(f"Modules: {len(context.modules)}")
+                print(f"Language: {context.language}")
+                print(f"Framework: {context.framework} {context.framework_version}")
+                print(f"Test Framework: {context.test_framework}")
+                print(f"Dependencies: {len(context.dependencies)}")
+                print(f"Config Files: {', '.join(context.config_files) if context.config_files else 'none'}")
+                print("\nStructure:")
+                for category, files in context.structure.items():
+                    if files:
+                        print(f"  {category}: {len(files)} files")
         except Exception as e:
             print(f"Error scanning project: {e}")
+
+    def cmd_templates(self, args: str):
+        """List available task templates."""
+        from config.task_templates import list_templates
+        templates = list_templates()
+        if not templates:
+            print("No templates available.")
+            return
+
+        print("\n" + "-" * 70)
+        print("TASK TEMPLATES")
+        print("-" * 70)
+        for tmpl in templates:
+            print(f"\n  [{tmpl['category']}] {tmpl['name']} ({tmpl['id']})")
+            print(f"    {tmpl['description']}")
+        print("\nUse: template <id> to view full template.")
+
+    def cmd_template(self, args: str):
+        """Show a specific task template."""
+        if not args:
+            print("Usage: template <template_id>")
+            print("Use: templates to list available templates.")
+            return
+
+        template_id = args.strip()
+        from config.task_templates import get_template
+        tmpl = get_template(template_id)
+        if not tmpl:
+            print(f"Template not found: {template_id}")
+            return
+
+        print(f"\n{'=' * 70}")
+        print(f"TEMPLATE: {tmpl['name']}")
+        print(f"{'=' * 70}")
+        print(f"Category: {tmpl.get('category', 'general')}")
+        print(f"Default Priority: {tmpl.get('default_priority', 'normal')}")
+        print(f"\nTemplate Description:\n{tmpl['template']}")
+        if tmpl.get('params'):
+            print("\nParameters (use `submit-template <id>` to fill these):")
+            for k, v in tmpl['params'].items():
+                print(f"  {k} = {v}")
+
+    def cmd_dry_run(self, args: str):
+        """Preview task execution without modifying files."""
+        if not args:
+            print("Usage: dry-run <task_id>")
+            return
+
+        task_id = args.strip()
+        task = self.delegation.get_task(task_id)
+        if not task:
+            print(f"Task not found: {task_id}")
+            return
+
+        print(f"\nDry-running task {task_id}...")
+        print("(No files will be modified)")
+
+        from core.dry_run import dry_run_mode
+        with dry_run_mode():
+            try:
+                asyncio.run(self.orchestrator.process_task_with_agent(task_id))
+            except Exception as e:
+                print(f"Error during dry-run: {e}")
+
+        log = dry_run_mode.get_log()
+        if log:
+            print(f"\nWould perform {len(log)} actions:")
+            for entry in log:
+                print(f"  {entry}")
+        else:
+            print("\nNo actions would be performed.")
+        dry_run_mode.clear_log()
+
+    def cmd_export_team(self, args: str):
+        """Export team configuration to YAML file."""
+        if not args:
+            print("Usage: export-team <filepath>")
+            return
+
+        filepath = Path(args.strip())
+        from core.team_io import export_team
+        success = export_team(self.role_manager, filepath)
+        if success:
+            print(f"Team exported to {filepath}")
+        else:
+            print(f"Failed to export team to {filepath}")
+
+    def cmd_import_team(self, args: str):
+        """Import team configuration from YAML file."""
+        if not args:
+            print("Usage: import-team <filepath> [--overwrite]")
+            return
+
+        parts = args.strip().split()
+        filepath = Path(parts[0])
+        overwrite = '--overwrite' in parts
+
+        from core.team_io import import_team
+        result = import_team(self.role_manager, filepath, overwrite=overwrite)
+        print(f"\nImport results:")
+        print(f"  Roles created: {len(result['created_roles'])}")
+        print(f"  Agents created: {len(result['created_instances'])}")
+        print(f"  Skipped: {len(result['skipped_roles']) + len(result['skipped_instances'])}")
+        if result['errors']:
+            print(f"  Errors: {len(result['errors'])}")
+            for err in result['errors']:
+                print(f"    - {err}")
+        if result['skipped_roles']:
+            print(f"\nSkipped roles (use --overwrite to replace):")
+            for r in result['skipped_roles']:
+                print(f"  - {r}")
+        if result['skipped_instances']:
+            print(f"Skipped agents (use --overwrite to replace):")
+            for i in result['skipped_instances']:
+                print(f"  - {i}")
     
     def cmd_exit(self, args: str):
         """Exit the CLI."""

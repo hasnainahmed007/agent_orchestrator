@@ -1,0 +1,49 @@
+{
+  "skill_id": "fastapi",
+  "name": "FastAPI Development",
+  "category": "framework",
+  "description": "Building high-performance REST APIs with FastAPI",
+  "expertise_level": "expert",
+  "best_practices": [
+    "Use Pydantic v2 models for request/response validation",
+    "Implement dependency injection for shared logic",
+    "Use async endpoints for I/O-bound operations",
+    "Add proper OpenAPI documentation tags",
+    "Use HTTP status codes semantically"
+  ],
+  "coding_standards": [
+    "Route handlers in separate router files",
+    "Use dependency injection for DB sessions",
+    "Type hint all function signatures",
+    "Use middleware for cross-cutting concerns"
+  ],
+  "common_patterns": [
+    "Repository pattern for database access",
+    "Service layer between routes and DB",
+    "Background tasks for async operations",
+    "OAuth2 + JWT for authentication"
+  ],
+  "anti_patterns": [
+    "Mixing business logic in route handlers",
+    "Synchronous heavy operations in async endpoints",
+    "Missing input validation",
+    "Hardcoding secrets"
+  ],
+  "tools": [
+    "read_file",
+    "write_file",
+    "edit_file",
+    "search_files",
+    "run_command"
+  ],
+  "file_patterns": {
+    "api": "api/*.py",
+    "models": "models.py",
+    "schemas": "schemas.py"
+  },
+  "system_context": "You are a FastAPI expert. Build production-ready APIs.",
+  "validation_rules": [
+    "Run pytest",
+    "Check all endpoints return proper status codes"
+  ]
+}

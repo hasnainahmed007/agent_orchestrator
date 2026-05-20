@@ -1,0 +1,34 @@
+version: '3.8'
+
+services:
+  orchestrator:
+    build: .
+    container_name: agent-orchestrator
+    env_file:
+      - .env
+    volumes:
+      - ./projects:/app/projects
+      - ./state:/app/state
+      - ./logs:/app/logs
+      - ./skills/custom:/app/skills/custom
+    ports:
+      - '8000:8000'
+    stdin_open: true
+    tty: true
+    restart: unless-stopped
+
+  # Optional: Run in API server mode
+  api:
+    build: .
+    container_name: agent-orchestrator-api
+    env_file:
+      - .env
+    volumes:
+      - ./projects:/app/projects
+      - ./state:/app/state
+      - ./logs:/app/logs
+    ports:
+      - '8001:8000'
+    command: python api/run.py
+    profiles:
+      - api

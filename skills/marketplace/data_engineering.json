@@ -1,0 +1,22 @@
+{
+  "skill_id": "data_engineering",
+  "name": "Data Engineering & ETL",
+  "category": "concept",
+  "description": "Building data pipelines with Python (pandas, sqlite)",
+  "expertise_level": "expert",
+  "best_practices": [
+    "Use pandas for data manipulation",
+    "Implement incremental loads where possible",
+    "Log every step of the pipeline",
+    "Validate data quality at each stage",
+    "Handle edge cases: empty files, malformed data"
+  ],
+  "tools": [
+    "read_file",
+    "write_file",
+    "edit_file",
+    "search_files",
+    "run_command"
+  ],
+  "system_context": "Build reliable ETL pipelines with proper error handling and logging."
+}

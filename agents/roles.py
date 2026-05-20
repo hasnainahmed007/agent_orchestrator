@@ -440,14 +440,16 @@ class AgentRoleManager:
                 print(f"Warning: Could not load instances: {e}")
     
     def _save(self):
-        """Save roles and instances to disk."""
-        # Save all roles (including defaults, so they can be modified)
-        roles_data = {
+        """Save custom roles and instances to disk.
+        Default roles are never persisted to avoid accidental overwrite.
+        """
+        custom_roles = {
             role_id: role.to_dict()
             for role_id, role in self.roles.items()
+            if role_id not in self.DEFAULT_ROLES
         }
-        self.roles_file.write_text(json.dumps(roles_data, indent=2))
-        
+        self.roles_file.write_text(json.dumps(custom_roles, indent=2))
+
         instances_data = {
             inst_id: inst.to_dict()
             for inst_id, inst in self.instances.items()
@@ -488,9 +490,9 @@ class AgentRoleManager:
     
     def delete_role(self, role_id: str) -> bool:
         """Delete a custom role. Cannot delete default roles."""
-        if role_id in self.DEFAULT_ROLES and role_id not in self._get_custom_role_ids():
+        if role_id in self.DEFAULT_ROLES:
             raise ValueError(f"Cannot delete default role: {role_id}")
-        
+
         if role_id in self.roles:
             del self.roles[role_id]
             self._save()
@@ -608,36 +610,48 @@ class AgentRoleManager:
         return reviewers
     
     def find_best_agent_for_task(self, task_description: str, skill_registry: SkillRegistry) -> Optional[AgentInstance]:
-        """Find the best available agent for a task based on skills."""
+        """Find the best available agent for a task based on skills and capacity."""
         desc_lower = task_description.lower()
-        
-        # Score each available agent
+
         best_agent = None
         best_score = -1
-        
+
         for instance in self.get_available_instances():
             role = self.roles.get(instance.role_id)
             if not role:
                 continue
-            
+
+            # Check max concurrent tasks limit (None = unlimited, 0 = blocked)
+            if role.max_concurrent_tasks is not None:
+                active_count = self._count_active_tasks(instance.instance_id)
+                if active_count >= role.max_concurrent_tasks:
+                    continue
+
             score = 0
             for skill_id in role.skills:
                 skill = skill_registry.get_skill(skill_id)
                 if skill:
-                    # Check if skill keywords match task description
                     skill_keywords = skill.name.lower().split() + skill.description.lower().split()
                     for kw in skill_keywords:
                         if len(kw) > 3 and kw in desc_lower:
                             score += 1
-            
+
             # Prefer higher hierarchy for complex tasks
             score += (5 - role.hierarchy_level) * 0.5
-            
+
             if score > best_score:
                 best_score = score
                 best_agent = instance
-        
+
         return best_agent
+
+    def _count_active_tasks(self, instance_id: str) -> int:
+        """Count active (non-idle) tasks for an agent instance."""
+        count = 0
+        for inst in self.instances.values():
+            if inst.instance_id == instance_id and inst.status == 'busy':
+                count += 1
+        return count
     
     def get_team_summary(self) -> Dict[str, Any]:
         """Get summary of the entire team."""

@@ -1,0 +1,21 @@
+{
+  "skill_id": "cli_tools",
+  "name": "CLI Tool Development",
+  "category": "concept",
+  "description": "Building command-line interfaces with argparse/click",
+  "expertise_level": "intermediate",
+  "best_practices": [
+    "Use argparse or click for argument parsing",
+    "Provide --help for every command",
+    "Support --dry-run for safe previews",
+    "Use colored output for readability",
+    "Exit codes for success/failure"
+  ],
+  "tools": [
+    "read_file",
+    "write_file",
+    "edit_file",
+    "run_command"
+  ],
+  "system_context": "Build robust CLI tools following Unix philosophy."
+}

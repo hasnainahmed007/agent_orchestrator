@@ -1,0 +1,56 @@
+name: Bug Report
+description: Report a bug in Agent Orchestrator
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug! Please fill out the information below.
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Which version are you running?
+      placeholder: '1.0.0'
+    validations:
+      required: true
+
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Running Mode
+      options:
+        - CLI
+        - Telegram
+        - API
+        - Docker
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: Describe the bug and what you expected to happen.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Step-by-step instructions to trigger the bug.
+      placeholder: |
+        1. Run `python main.py --mode cli`
+        2. Type `create-agent`
+        3. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Paste any relevant log output from `logs/orchestrator.log`.
+      render: shell

@@ -84,9 +84,9 @@ class CostTracker:
         return round(input_cost + output_cost, 6)
     
     def record_usage(self, model: str, prompt_tokens: int, completion_tokens: int, 
-                    agent_name: str = "", task_id: str = ""):
-        """Record API usage.
-        
+                    agent_name: str = "", task_id: str = "") -> float:
+        """Record API usage. Returns calculated cost.
+
         Args:
             model: Model name used
             prompt_tokens: Number of input tokens
@@ -112,8 +112,8 @@ class CostTracker:
         
         self._update_daily_budget(cost, total_tokens)
         self._save()
-        
-        return usage
+
+        return cost
     
     def _update_daily_budget(self, cost: float, tokens: int):
         """Update daily budget tracking."""

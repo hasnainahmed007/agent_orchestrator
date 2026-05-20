@@ -66,7 +66,10 @@ class OrchestratorAPI:
     def __init__(self, orchestrator=None):
         self.orchestrator = orchestrator
         self.app = None
-        self.api_key = Config.OPENAI_API_KEY[:16]
+        self.api_key = Config.API_KEY
+        if not self.api_key:
+            import uuid
+            self.api_key = uuid.uuid4().hex
         self.auth = APIKeyAuth(self.api_key)
         
     def create_app(self) -> FastAPI:

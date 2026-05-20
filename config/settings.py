@@ -21,11 +21,19 @@ class Config:
     PROJECT_TYPE = os.getenv('PROJECT_TYPE', 'generic')
     MAIN_BRANCH = os.getenv('MAIN_BRANCH', 'main')
 
-    # OpenAI
+    # OpenAI / LLM Provider
     OPENAI_API_KEY = os.getenv('OPENAI_API_KEY', '')
     OPENAI_MODEL = os.getenv('OPENAI_MODEL', 'gpt-4o')
+    OPENAI_BASE_URL = os.getenv('OPENAI_BASE_URL', '')
     OPENAI_MAX_TOKENS = int(os.getenv('OPENAI_MAX_TOKENS', '4000'))
     OPENAI_TEMPERATURE = float(os.getenv('OPENAI_TEMPERATURE', '0.1'))
+
+    # Multi-LLM provider support
+    LLM_PROVIDER = os.getenv('LLM_PROVIDER', 'auto')  # openai, anthropic, google, ollama, auto
+    LLM_API_KEY = os.getenv('LLM_API_KEY', '')  # For non-OpenAI providers
+
+    # API Server
+    API_KEY = os.getenv('API_KEY', '')  # Dedicated API key for REST API (auto-generated if empty)
 
     # Telegram
     TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', '')
@@ -63,6 +71,11 @@ class Config:
     STATE_FILE = BASE_DIR / os.getenv('STATE_FILE', 'state/orchestrator_state.json')
     TASKS_FILE = BASE_DIR / os.getenv('TASKS_FILE', 'state/tasks.json')
 
+    # Database
+    # PostgreSQL: postgresql://user:pass@localhost:5432/dbname
+    # SQLite: sqlite:///state/orchestrator.db (default if empty)
+    DATABASE_URL = os.getenv('DATABASE_URL', '')
+
     # Skills
     CUSTOM_SKILLS_DIR = BASE_DIR / os.getenv('CUSTOM_SKILLS_DIR', 'skills/custom')
 
@@ -77,6 +90,15 @@ class Config:
 
         if not cls.TELEGRAM_BOT_TOKEN or cls.TELEGRAM_BOT_TOKEN == 'your_telegram_bot_token_here':
             warnings.append("TELEGRAM_BOT_TOKEN not set. Telegram bot mode will be unavailable.")
+
+        if cls.TELEGRAM_ALLOWED_USERS:
+            for uid in cls.TELEGRAM_ALLOWED_USERS:
+                if not uid.strip().isdigit():
+                    warnings.append(
+                        f"TELEGRAM_ALLOWED_USERS contains non-numeric value '{uid}'. "
+                        "User IDs are numbers, not usernames. Use /myid in Telegram to get your ID."
+                    )
+                    break
 
         # Make project path if it doesn't exist
         cls.PROJECT_PATH.mkdir(parents=True, exist_ok=True)

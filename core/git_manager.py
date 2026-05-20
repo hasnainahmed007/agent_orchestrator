@@ -32,32 +32,41 @@ class GitManager:
     
     def create_branch(self, task_id: str, agent_name: str) -> str:
         """Create a new feature branch for a task.
-        
+
         Args:
             task_id: Unique task identifier
             agent_name: Name of the agent working on this
-            
+
         Returns:
             Branch name
         """
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         branch_name = f"agent/{agent_name}/{task_id}-{timestamp}"
-        
+
         # Sanitize branch name
         branch_name = re.sub(r'[^a-zA-Z0-9/_-]', '-', branch_name)
-        
+
+        # Check for uncommitted changes before switching
+        if not self.is_clean():
+            self.stage_files()
+            self.commit(f"Auto-commit before switching to {branch_name}")
+            # If still dirty (e.g., stash needed), try stash
+            if self.repo.is_dirty(untracked_files=True):
+                self.repo.git.stash('push', '--include-untracked',
+                                    '-m', f'Auto-stash before {branch_name}')
+
         # Checkout main first
         self.repo.git.checkout(self.main_branch)
-        
+
         # Pull latest changes
         try:
             self.repo.git.pull('origin', self.main_branch)
         except GitCommandError:
             pass  # May fail if no remote
-        
+
         # Create and checkout new branch
         self.repo.git.checkout('-b', branch_name)
-        
+
         return branch_name
     
     def stage_files(self, files: Optional[List[str]] = None):
@@ -146,32 +155,35 @@ class GitManager:
     
     def merge_branch(self, branch: str, message: Optional[str] = None) -> Tuple[bool, str]:
         """Merge a branch into main.
-        
+
         Args:
             branch: Branch to merge
             message: Merge commit message
-            
+
         Returns:
             Tuple of (success, message)
         """
         try:
             # Checkout main
             self.repo.git.checkout(self.main_branch)
-            
+
             # Pull latest
             try:
                 self.repo.git.pull('origin', self.main_branch)
             except GitCommandError:
                 pass
-            
+
             # Merge
             merge_msg = message or f"Merge {branch}"
             self.repo.git.merge(branch, '-m', merge_msg, '--no-ff')
-            
+
             return True, f"Successfully merged {branch} into {self.main_branch}"
-        
+
         except GitCommandError as e:
-            # Merge conflict or other error
+            try:
+                self.repo.git.merge('--abort')
+            except GitCommandError:
+                pass
             return False, f"Merge failed: {e}"
     
     def delete_branch(self, branch: str, force: bool = False):

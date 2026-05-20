@@ -38,13 +38,26 @@ class TelegramBot:
     def _is_authorized(self, user_id: str) -> bool:
         """Check if user is authorized."""
         return str(user_id) in self.allowed_users
+
+    async def myid_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /myid command — tell user their numeric ID."""
+        user = update.effective_user
+        await update.message.reply_text(
+            f"Your Telegram User ID is: `{user.id}`\n\n"
+            "Add this to `TELEGRAM_ALLOWED_USERS` in your `.env` file.",
+            parse_mode='Markdown'
+        )
     
     async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /start command."""
         user_id = str(update.effective_user.id)
         
         if not self._is_authorized(user_id):
-            await update.message.reply_text("You are not authorized to use this bot.")
+            await update.message.reply_text(
+                "You are not authorized to use this bot.\n\n"
+                "Send `/myid` to get your numeric User ID, "
+                "then add it to `TELEGRAM_ALLOWED_USERS` in `.env`."
+            )
             return
         
         team_info = ""
@@ -585,6 +598,7 @@ Review the changes and approve or reject.
         # Simple command handlers
         self.application.add_handler(CommandHandler("start", self.start_command))
         self.application.add_handler(CommandHandler("help", self.help_command))
+        self.application.add_handler(CommandHandler("myid", self.myid_command))
         self.application.add_handler(CommandHandler("team", self.team_command))
         self.application.add_handler(CommandHandler("agents", self.agents_command))
         self.application.add_handler(CommandHandler("roles", self.roles_command))
