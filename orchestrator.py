@@ -4,6 +4,7 @@ import sys
 import logging
 import asyncio
 import argparse
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict, List, Any
@@ -16,9 +17,10 @@ from config.prompts import PromptComposer, build_project_context
 from config.task_templates import list_templates, build_task_from_template, get_template
 from skills.registry import get_skill_registry
 from agents.roles import AgentRoleManager, AgentRole, AgentInstance
-from agents.delegation import TaskDelegationEngine, DelegatedTask
+from agents.delegation import TaskDelegationEngine, DelegatedTask, SubTask
 from core.git_manager import GitManager
 from core.project_context import ProjectContextScanner
+from core.project_manager import ProjectManager
 from core.validator import Validator
 from core.state_manager import StateManager
 from core.cost_tracker import CostTracker
@@ -80,6 +82,16 @@ class Orchestrator:
         self.delegation = TaskDelegationEngine(Config.STATE_FILE.parent, self.role_manager)
         self._setup_delegation_callbacks()
 
+        # Initialize project manager for multi-project support
+        self.project_manager = ProjectManager(
+            Config.STATE_FILE.parent,
+            projects_dir=Config.BASE_PROJECTS_DIR
+        )
+
+        # Human help synchronization: task_id -> threading.Event
+        self._help_events: Dict[str, threading.Event] = {}
+        self._help_responses: Dict[str, str] = {}
+
         # Initialize core components
         self.git = GitManager(Config.PROJECT_PATH, Config.MAIN_BRANCH)
         self.validator = Validator(Config.PROJECT_PATH, Config.PROJECT_TYPE)
@@ -134,6 +146,8 @@ class Orchestrator:
         self.delegation.on_task_completed(self._on_task_completed)
         self.delegation.on_task_failed(self._on_task_failed)
         self.delegation.on_approval_needed(self._on_approval_needed)
+        self.delegation.on_task_blocked(self._on_task_blocked)
+        self.delegation.on_task_resumed(self._on_task_resumed)
     
     def _on_task_created(self, task: DelegatedTask):
         """Handle task creation."""
@@ -173,14 +187,111 @@ class Orchestrator:
         
         # Notify via Telegram if available
         if self.telegram and hasattr(self.telegram, 'notify_approval_request'):
-            asyncio.create_task(
-                self.telegram.notify_approval_request(
-                    chat_id=0,  # Will be set by Telegram bot
-                    task_id=task.task_id,
-                    branch=task.branch_name,
-                    changes_summary=task.result_summary[:2000]
-                )
+            admin_chat_ids = self.telegram.allowed_users
+            for chat_id_str in admin_chat_ids:
+                try:
+                    chat_id = int(chat_id_str)
+                    asyncio.create_task(
+                        self.telegram.notify_approval_request(
+                            chat_id=chat_id,
+                            task_id=task.task_id,
+                            branch=task.branch_name,
+                            changes_summary=task.result_summary[:2000]
+                        )
+                    )
+                except (ValueError, TypeError):
+                    pass
+    
+    def _on_task_blocked(self, task: DelegatedTask = None, reason: str = "",
+                         agent_id: str = None, subtask: SubTask = None):
+        """Handle task blocked — agent needs human help. Send Telegram notification."""
+        logger.warning(f"Task {task.task_id if task else '?'} blocked: {reason[:100]}")
+        
+        if self.telegram and self.telegram.allowed_users:
+            agent_name = "Unknown"
+            if agent_id:
+                agent = self.role_manager.get_instance(agent_id)
+                if agent:
+                    agent_name = agent.name
+            
+            message = (
+                f"\U0001F6A8 *Agent Blocked - Needs Help*\n\n"
+                f"*Task:* `{task.task_id if task else '?'}`\n"
+                f"*Agent:* {agent_name}\n"
+                f"*Problem:* {reason[:1500]}\n\n"
+                f"Reply to resolve:\n"
+                f"`/resolve {task.task_id if task else ''} <your instructions>`"
             )
+            
+            for chat_id_str in self.telegram.allowed_users:
+                try:
+                    chat_id = int(chat_id_str)
+                    asyncio.create_task(self._notify(chat_id, message))
+                except (ValueError, TypeError):
+                    pass
+    
+    def _on_task_resumed(self, task: DelegatedTask = None, response: str = "",
+                         subtask: SubTask = None):
+        """Handle task resumed after human help."""
+        logger.info(f"Task {task.task_id if task else '?'} resumed with human response")
+        
+        # Signal the waiting AskHumanTool
+        task_id = task.task_id if task else None
+        if task_id:
+            self._help_responses[task_id] = response
+            event = self._help_events.get(task_id)
+            if event:
+                event.set()
+    
+    # Human Help Methods (called by AskHumanTool)
+    # -------------------------------------------------------------------------
+    
+    def request_help(self, task_id: str, question: str) -> None:
+        """Called by AskHumanTool: blocks task and notifies human.
+        
+        This is invoked synchronously from the agent's thread.
+        It registers the help event and notifies via delegation engine.
+        
+        Args:
+            task_id: Task ID requesting help
+            question: The agent's question
+        """
+        # Create event for this task
+        if task_id not in self._help_events:
+            self._help_events[task_id] = threading.Event()
+        
+        # Mark task as blocked (this triggers _on_task_blocked callback)
+        self.delegation.request_help(task_id, question)
+    
+    def get_help_response(self, task_id: str) -> Optional[str]:
+        """Called by AskHumanTool: poll for human response.
+        
+        Returns None if no response yet, the response string if available.
+        Called from agent thread.
+        
+        Args:
+            task_id: Task ID to check for response
+        """
+        return self._help_responses.pop(task_id, None)
+    
+    def resolve_task_help(self, task_id: str, response: str) -> bool:
+        """Called by Telegram bot: human resolves a blocked task.
+        
+        Args:
+            task_id: Task ID to resolve
+            response: Human's instructions
+            
+        Returns:
+            True if resolved
+        """
+        if not self.delegation.resolve_help(task_id, response):
+            return False
+        
+        # Clean up
+        self._help_events.pop(task_id, None)
+        self._help_responses.pop(task_id, None)
+        
+        return True
     
     # Agent & Role Management
     # -------------------------------------------------------------------------
@@ -206,7 +317,9 @@ class Orchestrator:
     
     async def submit_task(self, title: str, description: str,
                          assign_to: Optional[str] = None,
-                         priority: str = "normal") -> DelegatedTask:
+                         priority: str = "normal",
+                         project_path: str = None,
+                         project_type: str = None) -> DelegatedTask:
         """Submit a new task.
         
         Args:
@@ -214,23 +327,44 @@ class Orchestrator:
             description: Task description
             assign_to: Instance ID to assign to (optional, auto-assigns if None)
             priority: Task priority
+            project_path: Optional project path (use 'auto' or omit for auto-create)
+            project_type: Project type for auto-create (defaults to Config.PROJECT_TYPE)
         
         Returns:
             Created task
         """
+        # Determine project
+        proj_type = project_type or Config.PROJECT_TYPE
+        project = self.project_manager.get_or_create_project(
+            task_description=description,
+            project_type=proj_type,
+            requested_path=project_path
+        )
+        
         # Create task in delegation engine
-        task = self.delegation.create_task(title, description, priority=priority)
+        task = self.delegation.create_task(
+            title, description,
+            priority=priority,
+            project_id=project.project_id,
+            project_path=project.path
+        )
+        
+        # Track project linkage
+        self.project_manager.add_task_to_project(project.project_id, task.task_id)
         
         # Auto-assign or manual assign
         if assign_to:
             self.delegation.assign_task(task.task_id, assign_to)
+            self.project_manager.add_agent_to_project(project.project_id, assign_to)
         elif Config.ENABLE_AUTO_ASSIGN:
             agent_id = self.delegation.auto_assign_task(task.task_id, self.skill_registry)
             if agent_id:
                 logger.info(f"Auto-assigned task {task.task_id} to agent {agent_id}")
+                self.project_manager.add_agent_to_project(project.project_id, agent_id)
         
-        # Legacy tracking
-        branch_name = self.git.create_branch(task.task_id, "orchestrator")
+        # Git branch in project's repo
+        git = GitManager(Path(project.path), Config.MAIN_BRANCH)
+        branch_name = git.create_branch(task.task_id, "orchestrator")
         task.branch_name = branch_name
         self.state.create_task(task.task_id, description, branch_name)
         
@@ -314,13 +448,23 @@ class Orchestrator:
             # Execute directly with CrewAI
             logger.info(f"Executing task {task_id} with agent {agent_instance.name}")
 
-            # Create CrewAI agent
+            # Create AskHumanTool for this task
+            from tools.ask_human import create_ask_human_tool
+            ask_human_tool = create_ask_human_tool(
+                on_help_requested=self.request_help,
+                get_help_response=self.get_help_response,
+                task_id=task_id,
+                timeout=3600
+            )
+
+            # Create CrewAI agent with ask_human tool
             crew_agent = self.agent_manager.create_dynamic_agent(
                 name=agent_instance.name,
                 role=role.name,
                 goal=f"Complete the task: {task.title}",
                 backstory=system_prompt,
-                tools=role.get_allowed_tools(self.skill_registry)
+                tools=role.get_allowed_tools(self.skill_registry),
+                extra_tools=[ask_human_tool]
             )
 
             # Execute
@@ -346,26 +490,31 @@ class Orchestrator:
             task.status = "completed"
             task.completed_at = datetime.now().isoformat()
             
+            # Use task-specific project path for git and validation
+            task_project_path = Path(task.project_path or Config.PROJECT_PATH)
+            task_git = GitManager(task_project_path, Config.MAIN_BRANCH)
+            task_validator = Validator(task_project_path, task.project_type if hasattr(task, 'project_type') else Config.PROJECT_TYPE)
+
             # Get changed files
-            changed_files = self.git.get_changed_files(task.branch_name)
+            changed_files = task_git.get_changed_files(task.branch_name)
             task.deliverables = changed_files
             validation_ok = True
 
             # Validate if files changed
             if changed_files:
-                validation = self.validator.validate_all(changed_files)
+                validation = task_validator.validate_all(changed_files)
                 validation_ok = validation.success
                 if not validation.success and Config.ENABLE_ROLLBACK:
                     logger.error(f"Validation failed for task {task_id}")
-                    self.git.rollback_branch(task.branch_name)
+                    task_git.rollback_branch(task.branch_name)
                     task.status = "failed"
                     task.error_message = f"Validation failed: {validation.message}"
                     self.delegation._save()
                     return False
                 
                 # Commit changes
-                self.git.stage_files(changed_files)
-                self.git.commit(f"Agent completed: {task.title[:50]}", author_name=agent_instance.name)
+                task_git.stage_files(changed_files)
+                task_git.commit(f"Agent completed: {task.title[:50]}", author_name=agent_instance.name)
             
             # Check approval requirement
             if role.approval_required:
@@ -375,8 +524,7 @@ class Orchestrator:
                 agent_instance.complete_task(task_id, success=True)
                 self.role_manager.update_instance(
                     agent_instance.instance_id,
-                    status="idle",
-                    current_task_id=None
+                    status="idle" if agent_instance.is_idle() else "busy"
                 )
             
             self.delegation._save()
@@ -404,8 +552,7 @@ class Orchestrator:
             agent_instance.complete_task(task_id, success=False)
             self.role_manager.update_instance(
                 agent_instance.instance_id,
-                status="idle",
-                current_task_id=None
+                status="idle" if agent_instance.is_idle() else "busy"
             )
             self.delegation._save()
             self.state.update_task_status(task_id, "failed", str(e))
@@ -525,16 +672,18 @@ class Orchestrator:
         # Auto-merge if configured and branch exists
         if Config.AUTO_MERGE_ON_TESTS_PASS and task and task.branch_name:
             try:
-                success, msg = self.git.merge_branch(task.branch_name)
+                task_project_path = Path(task.project_path or Config.PROJECT_PATH)
+                task_git = GitManager(task_project_path, Config.MAIN_BRANCH)
+                success, msg = task_git.merge_branch(task.branch_name)
                 if success:
                     logger.info(f"Auto-merged {task.branch_name}: {msg}")
                     self.audit_logger.log_task_event(task_id, "auto_merged",
-                                                     {"branch": task.branch_name})
+                                                      {"branch": task.branch_name})
                     self.state.update_task_status(task_id, "merged")
                 else:
                     logger.warning(f"Auto-merge failed: {msg}")
                     self.audit_logger.log_task_event(task_id, "auto_merge_failed",
-                                                     {"error": msg})
+                                                      {"error": msg})
             except Exception as e:
                 logger.error(f"Auto-merge error: {e}")
 
@@ -559,6 +708,7 @@ class Orchestrator:
             'tasks': self.delegation.get_stats(),
             'project': Config.PROJECT_NAME,
             'project_type': Config.PROJECT_TYPE,
+            'projects': self.project_manager.get_project_stats(),
             'skills_loaded': len(self.skill_registry.skills),
             'costs': {
                 'today': self.cost_tracker.get_remaining_budget(),

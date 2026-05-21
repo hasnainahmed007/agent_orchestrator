@@ -21,7 +21,8 @@ logger = logging.getLogger(__name__)
 
 # Conversation states
 CREATE_AGENT_NAME, CREATE_AGENT_ROLE, CREATE_AGENT_SKILLS = range(3)
-SUBMIT_TASK_TITLE, SUBMIT_TASK_DESC, SUBMIT_TASK_PRIORITY = range(3, 6)
+SUBMIT_TASK_TITLE, SUBMIT_TASK_DESC, SUBMIT_TASK_PATH, SUBMIT_TASK_PRIORITY = range(3, 7)
+RESOLVE_TASK_ID, RESOLVE_TASK_MSG = range(7, 9)
 
 
 class TelegramBot:
@@ -80,6 +81,9 @@ createagent - Create a new agent
 /task <id> - Task details
 /approve <id> - Approve task
 /reject <id> - Reject task
+/blocked - Show blocked tasks
+/resolve - Resolve a blocked task
+/projects - List projects
 /skills - List skills
 /status - System status
 /help - Show help
@@ -112,10 +116,10 @@ List all available roles you can assign to agents.
 Create a new agent instance interactively.
 
 */submit*
-Submit a new task to the team.
+Submit a new task to the team (includes project path step).
 
 */tasks [status]*
-List tasks. Optional filter: pending, running, completed, failed, under_review.
+List tasks. Filter: pending, running, completed, failed, under_review, blocked.
 
 */task <task_id>*
 Show detailed information about a task.
@@ -125,6 +129,15 @@ Approve a task waiting for review.
 
 */reject <task_id>*
 Reject a task and return it for rework.
+
+*/blocked*
+Show all tasks waiting for human help.
+
+*/resolve*
+Resolve a blocked task with instructions.
+
+*/projects*
+List all projects with paths.
 
 */skills*
 List all available skill modules.
@@ -349,6 +362,18 @@ Show system status and statistics.
     async def submit_desc(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle task description."""
         context.user_data['task_desc'] = update.message.text.strip()
+        await update.message.reply_text(
+            "Project path?\n\n"
+            "Type a path like `/home/projects/my-app`\n"
+            "Or type `auto` for auto-create based on task description\n"
+            "Or type `default` to use default project"
+        )
+        return SUBMIT_TASK_PATH
+    
+    async def submit_path(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle project path input."""
+        path_input = update.message.text.strip()
+        context.user_data['project_path'] = path_input
         await update.message.reply_text("Priority? (low/normal/high/critical)")
         return SUBMIT_TASK_PRIORITY
     
@@ -360,18 +385,33 @@ Show system status and statistics.
         
         title = context.user_data['task_title']
         desc = context.user_data['task_desc']
+        project_path = context.user_data.get('project_path', 'auto')
+        
+        # Resolve project path
+        if project_path.lower() == 'default' or project_path.lower() == 'none':
+            project_path = None  # Will use default
+        elif project_path.lower() == 'auto':
+            pass  # Auto-create
+        else:
+            pass  # Use specified path
         
         try:
             task = await self.orchestrator.submit_task(
                 title=title,
                 description=desc,
-                priority=priority
+                priority=priority,
+                project_path=project_path if project_path.lower() != 'default' else None
             )
+            
+            project_info = ""
+            if hasattr(task, 'project_path') and task.project_path:
+                project_info = f"Project: {task.project_path}\n"
             
             await update.message.reply_text(
                 f"Task submitted!\n\n"
                 f"ID: `{task.task_id}`\n"
                 f"Title: {task.title}\n"
+                f"{project_info}"
                 f"Status: {task.status}\n"
                 f"Priority: {task.priority}",
                 parse_mode='Markdown'
@@ -514,11 +554,19 @@ Description:
         
         status = self.orchestrator.get_status()
         
+        projects_info = ""
+        if 'projects' in status:
+            projects_info = (
+                f"*Projects:* {status['projects']['total_projects']} "
+                f"({status['projects']['enabled']} active)\n"
+            )
+        
         text = f"""
 *System Status*
 
 Project: {status['project']}
 Type: {status['project_type']}
+{projects_info}
 Skills: {status['skills_loaded']}
 
 *Tasks:*
@@ -526,6 +574,7 @@ Skills: {status['skills_loaded']}
 - Pending: {status['tasks']['pending']}
 - In Progress: {status['tasks']['in_progress']}
 - Under Review: {status['tasks']['under_review']}
+- Blocked: {status['tasks'].get('blocked', 0)}
 - Completed: {status['tasks']['completed']}
 - Failed: {status['tasks']['failed']}
 
@@ -535,6 +584,143 @@ Skills: {status['skills_loaded']}
 """
         
         await update.message.reply_text(text, parse_mode='Markdown')
+    
+    async def projects_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /projects command."""
+        user_id = str(update.effective_user.id)
+        if not self._is_authorized(user_id):
+            return
+        
+        if not self.orchestrator:
+            await update.message.reply_text("Orchestrator not initialized.")
+            return
+        
+        projects = self.orchestrator.project_manager.list_projects()
+        if not projects:
+            await update.message.reply_text("No projects yet. Submit a task to auto-create one.")
+            return
+        
+        text = "*Projects*\n\n"
+        for p in projects:
+            status_icon = '\u2705' if p.enabled else '\u274C'
+            active = ' (active)' if p.project_id == self.orchestrator.project_manager.active_project_id else ''
+            text += f"{status_icon} *{p.name}*{active}\n"
+            text += f"   ID: `{p.project_id}`\n"
+            text += f"   Type: {p.project_type}\n"
+            text += f"   Path: `{p.path}`\n"
+            text += f"   Agents: {len(p.active_agents)} | Tasks: {len(p.tasks)}\n\n"
+        
+        await update.message.reply_text(text, parse_mode='Markdown')
+    
+    async def blocked_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /blocked command — show blocked tasks."""
+        user_id = str(update.effective_user.id)
+        if not self._is_authorized(user_id):
+            return
+        
+        if not self.orchestrator:
+            await update.message.reply_text("Orchestrator not initialized.")
+            return
+        
+        blocked_tasks = self.orchestrator.delegation.list_blocked_tasks()
+        if not blocked_tasks:
+            await update.message.reply_text("No blocked tasks.")
+            return
+        
+        text = "*Blocked Tasks - Needs Your Help*\n\n"
+        for task in blocked_tasks:
+            agent_name = "Unknown"
+            if task.assigned_to:
+                agent = self.orchestrator.role_manager.get_instance(task.assigned_to)
+                if agent:
+                    agent_name = agent.name
+            
+            # Find blocked subtask
+            block_reason = "No reason given"
+            for sub in task.subtasks:
+                if sub.status == "blocked":
+                    block_reason = sub.block_reason
+                    break
+            
+            text += f"\U0001F6A8 `{task.task_id}` - {task.title}\n"
+            text += f"   Agent: {agent_name}\n"
+            text += f"   Problem: {block_reason[:200]}\n"
+            
+            keyboard = [[InlineKeyboardButton(
+                f"Resolve {task.task_id}",
+                callback_data=f"resolve_{task.task_id}"
+            )]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await update.message.reply_text(text, parse_mode='Markdown', reply_markup=reply_markup)
+            text = ""  # Reset for next task (each gets own message)
+        
+        if not blocked_tasks:
+            pass  # Already handled above
+    
+    async def resolve_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /resolve command — resolve a blocked task."""
+        user_id = str(update.effective_user.id)
+        if not self._is_authorized(user_id):
+            return
+        
+        args = context.args
+        if not args:
+            # Start conversation: ask for task ID
+            await update.message.reply_text(
+                "Which task do you want to resolve?\n"
+                "Send the task ID (e.g., TASK-ABC12345)."
+            )
+            return RESOLVE_TASK_ID
+        
+        # Direct resolve: /resolve TASK-ID message...
+        task_id = args[0]
+        message = ' '.join(args[1:]) if len(args) > 1 else ""
+        
+        if not message:
+            context.user_data['resolve_task_id'] = task_id
+            await update.message.reply_text(f"What instructions for task `{task_id}`?")
+            return RESOLVE_TASK_MSG
+        
+        await self._do_resolve(update, task_id, message)
+        return ConversationHandler.END
+    
+    async def resolve_task_id_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle task ID input for resolve conversation."""
+        task_id = update.message.text.strip()
+        context.user_data['resolve_task_id'] = task_id
+        await update.message.reply_text(f"What instructions for task `{task_id}`?")
+        return RESOLVE_TASK_MSG
+    
+    async def resolve_task_msg_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle message input for resolve conversation."""
+        task_id = context.user_data.get('resolve_task_id', '')
+        message = update.message.text.strip()
+        await self._do_resolve(update, task_id, message)
+        return ConversationHandler.END
+    
+    async def _do_resolve(self, update, task_id: str, message: str):
+        """Execute task resolution."""
+        if not task_id:
+            await update.message.reply_text("No task ID provided.")
+            return
+        
+        try:
+            success = self.orchestrator.resolve_task_help(task_id, message)
+            if success:
+                await update.message.reply_text(
+                    f"Task `{task_id}` resolved!\n\n"
+                    f"Agent will continue with your instructions.",
+                    parse_mode='Markdown'
+                )
+            else:
+                await update.message.reply_text(
+                    f"Failed to resolve task `{task_id}`.\n"
+                    f"Task may not be in blocked status.",
+                    parse_mode='Markdown'
+                )
+        except Exception as e:
+            await update.message.reply_text(f"Error: {e}")
     
     async def button_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle button callbacks."""
@@ -558,6 +744,19 @@ Skills: {status['skills_loaded']}
                 await query.edit_message_text(f"Task {task_id} rejected.")
             else:
                 await query.edit_message_text(f"Failed to reject {task_id}.")
+        
+        elif data.startswith('resolve_'):
+            task_id = data.replace('resolve_', '')
+            # Store task ID and prompt for response
+            await query.edit_message_text(
+                f"Reply to this message with instructions for task `{task_id}`:\n\n"
+                f"_Send your instructions as a text message_",
+                parse_mode='Markdown'
+            )
+            # Store pending resolve in user_data
+            if not context.user_data.get('pending_resolves'):
+                context.user_data['pending_resolves'] = []
+            context.user_data['pending_resolves'].append(task_id)
     
     async def notify_approval_request(self, chat_id: int, task_id: str, branch: str, changes_summary: str):
         """Send approval request notification."""
@@ -607,7 +806,20 @@ Review the changes and approve or reject.
         self.application.add_handler(CommandHandler("task", self.task_command))
         self.application.add_handler(CommandHandler("approve", self.approve_command))
         self.application.add_handler(CommandHandler("reject", self.reject_command))
+        self.application.add_handler(CommandHandler("blocked", self.blocked_command))
+        self.application.add_handler(CommandHandler("projects", self.projects_command))
         self.application.add_handler(CommandHandler("status", self.status_command))
+        
+        # Resolve command - supports both direct and conversation modes
+        resolve_conv = ConversationHandler(
+            entry_points=[CommandHandler("resolve", self.resolve_command)],
+            states={
+                RESOLVE_TASK_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.resolve_task_id_handler)],
+                RESOLVE_TASK_MSG: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.resolve_task_msg_handler)],
+            },
+            fallbacks=[CommandHandler("cancel", self.cancel_conversation)]
+        )
+        self.application.add_handler(resolve_conv)
         
         # Conversation handlers
         create_agent_conv = ConversationHandler(
@@ -625,6 +837,7 @@ Review the changes and approve or reject.
             states={
                 SUBMIT_TASK_TITLE: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.submit_title)],
                 SUBMIT_TASK_DESC: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.submit_desc)],
+                SUBMIT_TASK_PATH: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.submit_path)],
                 SUBMIT_TASK_PRIORITY: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.submit_priority)],
             },
             fallbacks=[CommandHandler("cancel", self.cancel_conversation)]
@@ -633,11 +846,29 @@ Review the changes and approve or reject.
         self.application.add_handler(create_agent_conv)
         self.application.add_handler(submit_conv)
         
+        # General message handler for pending resolve replies
+        self.application.add_handler(
+            MessageHandler(filters.TEXT & ~filters.COMMAND, self.pending_resolve_handler)
+        )
+        
         # Callback handler
         self.application.add_handler(CallbackQueryHandler(self.button_callback))
         
         # Error handler
         self.application.add_error_handler(self.error_handler)
+    
+    async def pending_resolve_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle general text messages - check for pending resolves."""
+        pending = context.user_data.get('pending_resolves', [])
+        if not pending:
+            return  # Not a resolve reply, ignore
+        
+        # Take the first pending resolve
+        task_id = pending.pop(0)
+        context.user_data['pending_resolves'] = pending
+        
+        message = update.message.text.strip()
+        await self._do_resolve(update, task_id, message)
     
     async def error_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle errors."""

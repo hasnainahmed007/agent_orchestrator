@@ -16,6 +16,7 @@ class Config:
     BASE_DIR = Path(__file__).parent.parent
 
     # Project settings (generic - not tied to Laravel)
+    BASE_PROJECTS_DIR = Path(os.getenv('PROJECTS_DIR', str(BASE_DIR / 'projects')))
     PROJECT_PATH = Path(os.getenv('PROJECT_PATH', str(BASE_DIR / 'projects' / 'default')))
     PROJECT_NAME = os.getenv('PROJECT_NAME', 'default-project')
     PROJECT_TYPE = os.getenv('PROJECT_TYPE', 'generic')

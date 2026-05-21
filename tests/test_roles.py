@@ -138,7 +138,7 @@ class TestAgentInstance:
         inst = AgentInstance(instance_id='x', name='x', role_id='r')
         inst.assign_task('task-3')
         assert inst.status == 'busy'
-        assert inst.current_task_id == 'task-3'
+        assert 'task-3' in inst.current_task_ids
 
     def test_complete_task_success(self):
         """complete_task with success updates metrics."""

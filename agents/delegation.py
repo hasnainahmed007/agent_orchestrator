@@ -18,6 +18,7 @@ class TaskStatus(Enum):
     IN_PROGRESS = "in_progress"
     DELEGATED = "delegated"  # Task has been broken into subtasks
     UNDER_REVIEW = "under_review"
+    BLOCKED = "blocked"  # Waiting for human help
     APPROVED = "approved"
     REJECTED = "rejected"
     COMPLETED = "completed"
@@ -30,6 +31,7 @@ class SubTaskStatus(Enum):
     PENDING = "pending"
     ASSIGNED = "assigned"
     IN_PROGRESS = "in_progress"
+    BLOCKED = "blocked"  # Waiting for human help
     COMPLETED = "completed"
     FAILED = "failed"
     NEEDS_REVIEW = "needs_review"
@@ -62,6 +64,12 @@ class SubTask:
     review_required: bool = False
     reviewed_by: Optional[str] = None
     review_notes: str = ""
+    
+    # Human help / blocked
+    block_reason: str = ""
+    help_requested_at: Optional[str] = None
+    human_response: str = ""
+    resumed_at: Optional[str] = None
     
     def __post_init__(self):
         if not self.subtask_id:
@@ -123,6 +131,10 @@ class DelegatedTask:
     
     # Git integration
     branch_name: str = ""
+    
+    # Multi-project support
+    project_id: str = ""
+    project_path: str = ""
     
     def __post_init__(self):
         if not self.task_id:
@@ -191,6 +203,8 @@ class TaskDelegationEngine:
         self._on_task_completed: Optional[Callable] = None
         self._on_task_failed: Optional[Callable] = None
         self._on_approval_needed: Optional[Callable] = None
+        self._on_task_blocked: Optional[Callable] = None
+        self._on_task_resumed: Optional[Callable] = None
         
         self._load()
     
@@ -218,7 +232,9 @@ class TaskDelegationEngine:
     def create_task(self, title: str, description: str, 
                    assigned_to: Optional[str] = None,
                    priority: str = "normal",
-                   requested_by: str = "user") -> DelegatedTask:
+                   requested_by: str = "user",
+                   project_id: str = "",
+                   project_path: str = "") -> DelegatedTask:
         """Create a new task.
         
         Args:
@@ -227,6 +243,8 @@ class TaskDelegationEngine:
             assigned_to: Instance ID to assign to (optional - will auto-assign)
             priority: Task priority
             requested_by: Who requested the task
+            project_id: Project ID this task belongs to
+            project_path: Project filesystem path
         """
         task = DelegatedTask(
             task_id=f"TASK-{uuid.uuid4().hex[:8].upper()}",
@@ -235,7 +253,9 @@ class TaskDelegationEngine:
             requested_by=requested_by,
             assigned_to=assigned_to,
             priority=priority,
-            status="pending"
+            status="pending",
+            project_id=project_id,
+            project_path=project_path
         )
         
         self.tasks[task.task_id] = task
@@ -262,7 +282,7 @@ class TaskDelegationEngine:
         
         # Update agent status
         instance.assign_task(task_id)
-        self.role_manager.update_instance(instance_id, status="busy", current_task_id=task_id)
+        self.role_manager.update_instance(instance_id, status="busy")
         
         self._save()
         
@@ -336,8 +356,7 @@ class TaskDelegationEngine:
                     available[0].assign_task(subtask.subtask_id)
                     self.role_manager.update_instance(
                         available[0].instance_id,
-                        status="busy",
-                        current_task_id=subtask.subtask_id
+                        status="busy"
                     )
             
             task.subtasks.append(subtask)
@@ -367,8 +386,7 @@ class TaskDelegationEngine:
                             agent.complete_task(subtask_id, success=True)
                             self.role_manager.update_instance(
                                 agent.instance_id,
-                                status="idle",
-                                current_task_id=None
+                                status="idle" if agent.is_idle() else "busy"
                             )
                     
                     self._save()
@@ -396,8 +414,7 @@ class TaskDelegationEngine:
                             agent.complete_task(subtask_id, success=False)
                             self.role_manager.update_instance(
                                 agent.instance_id,
-                                status="idle",
-                                current_task_id=None
+                                status="idle" if agent.is_idle() else "busy"
                             )
                     
                     self._save()
@@ -450,8 +467,7 @@ class TaskDelegationEngine:
                         agent.complete_task(task_id, success=True)
                         self.role_manager.update_instance(
                             task.assigned_to,
-                            status="idle",
-                            current_task_id=None
+                            status="idle" if agent.is_idle() else "busy"
                         )
                 
                 if self._on_task_completed:
@@ -495,8 +511,7 @@ class TaskDelegationEngine:
                 agent.complete_task(task_id, success=True)
                 self.role_manager.update_instance(
                     task.assigned_to,
-                    status="idle",
-                    current_task_id=None
+                    status="idle" if agent.is_idle() else "busy"
                 )
         
         self._save()
@@ -522,8 +537,7 @@ class TaskDelegationEngine:
                 agent.complete_task(task_id, success=False)
                 self.role_manager.update_instance(
                     task.assigned_to,
-                    status="idle",
-                    current_task_id=None
+                    status="idle" if agent.is_idle() else "busy"
                 )
         
         self._save()
@@ -532,6 +546,111 @@ class TaskDelegationEngine:
             self._on_task_failed(task)
         
         return True
+    
+    # Human Help / Blocked Workflow
+    # -------------------------------------------------------------------------
+    
+    def request_help(self, task_id: str, reason: str, subtask_id: str = None) -> bool:
+        """Mark a task or subtask as blocked, requesting human help.
+        
+        This pauses execution. Agent will wait synchronously for human response.
+        Fires on_task_blocked callback if set.
+        
+        Args:
+            task_id: Task ID (or parent task ID if using subtask_id)
+            reason: Why help is needed
+            subtask_id: Optional subtask ID to block
+            
+        Returns:
+            True if blocked successfully
+        """
+        if subtask_id:
+            # Block a specific subtask
+            for t in self.tasks.values():
+                for subtask in t.subtasks:
+                    if subtask.subtask_id == subtask_id:
+                        subtask.status = "blocked"
+                        subtask.block_reason = reason
+                        subtask.help_requested_at = datetime.now().isoformat()
+                        self._save()
+                        if self._on_task_blocked:
+                            self._on_task_blocked(
+                                task=t,
+                                reason=reason,
+                                agent_id=subtask.assigned_to,
+                                subtask=subtask
+                            )
+                        return True
+            return False
+        
+        # Block the main task
+        task = self.tasks.get(task_id)
+        if not task:
+            return False
+        
+        task.status = "blocked"
+        self._save()
+        
+        if self._on_task_blocked:
+            self._on_task_blocked(
+                task=task,
+                reason=reason,
+                agent_id=task.assigned_to
+            )
+        
+        return True
+    
+    def resolve_help(self, task_id: str, response: str, subtask_id: str = None) -> bool:
+        """Resolve a blocked task with human response.
+        
+        Fires on_task_resumed callback.
+        
+        Args:
+            task_id: Task ID
+            response: Human's response/instructions
+            subtask_id: Optional subtask ID
+            
+        Returns:
+            True if resolved
+        """
+        if subtask_id:
+            for t in self.tasks.values():
+                for subtask in t.subtasks:
+                    if subtask.subtask_id == subtask_id:
+                        subtask.status = "in_progress"
+                        subtask.human_response = response
+                        subtask.resumed_at = datetime.now().isoformat()
+                        self._save()
+                        if self._on_task_resumed:
+                            self._on_task_resumed(task=t, response=response, subtask=subtask)
+                        return True
+            return False
+        
+        task = self.tasks.get(task_id)
+        if not task or task.status != "blocked":
+            return False
+        
+        task.status = "in_progress"
+        self._save()
+        
+        if self._on_task_resumed:
+            self._on_task_resumed(task=task, response=response)
+        
+        return True
+    
+    def list_blocked_tasks(self) -> List[DelegatedTask]:
+        """Get all tasks currently blocked waiting for human help."""
+        blocked = []
+        for task in self.tasks.values():
+            if task.status == "blocked":
+                blocked.append(task)
+            else:
+                # Check subtasks
+                for sub in task.subtasks:
+                    if sub.status == "blocked":
+                        blocked.append(task)
+                        break
+        return sorted(blocked, key=lambda t: t.created_at)
     
     # Task Queries
     # -------------------------------------------------------------------------
@@ -637,6 +756,14 @@ class TaskDelegationEngine:
         """Set callback for approval requests."""
         self._on_approval_needed = callback
     
+    def on_task_blocked(self, callback: Callable):
+        """Set callback for task blocked (needs human help)."""
+        self._on_task_blocked = callback
+    
+    def on_task_resumed(self, callback: Callable):
+        """Set callback for task resumed after human help."""
+        self._on_task_resumed = callback
+    
     # Statistics
     # -------------------------------------------------------------------------
     
@@ -651,6 +778,7 @@ class TaskDelegationEngine:
             'in_progress': len([t for t in all_tasks if t.status == "in_progress"]),
             'delegated': len([t for t in all_tasks if t.status == "delegated"]),
             'under_review': len([t for t in all_tasks if t.status == "under_review"]),
+            'blocked': len([t for t in all_tasks if t.status == "blocked"]),
             'completed': len([t for t in all_tasks if t.status == "completed"]),
             'failed': len([t for t in all_tasks if t.status == "failed"]),
             'rejected': len([t for t in all_tasks if t.status == "rejected"]),

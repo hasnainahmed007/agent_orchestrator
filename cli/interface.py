@@ -131,8 +131,8 @@ SYSTEM:
             print(f"   ID: {inst.instance_id}")
             print(f"   Role: {role_name} ({inst.role_id})")
             print(f"   Status: {inst.status}")
-            if inst.current_task_id:
-                print(f"   Current Task: {inst.current_task_id}")
+            if inst.current_task_ids:
+                print(f"   Current Tasks: {', '.join(inst.current_task_ids)}")
             print(f"   Completed: {inst.total_tasks_completed} | Failed: {inst.total_tasks_failed}")
         print()
     
@@ -242,7 +242,7 @@ SYSTEM:
         print(f"ID: {instance.instance_id}")
         print(f"Role: {role.name if role else 'Unknown'} ({instance.role_id})")
         print(f"Status: {instance.status}")
-        print(f"Current Task: {instance.current_task_id or 'None'}")
+        print(f"Current Tasks: {', '.join(instance.current_task_ids) if instance.current_task_ids else 'None'}")
         print(f"Created: {instance.created_at}")
         print(f"Last Active: {instance.last_active}")
         print(f"\nPerformance:")

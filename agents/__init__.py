@@ -43,7 +43,8 @@ class AgentManager:
         self.project_context = self.context_scanner.scan()
 
     def create_dynamic_agent(self, name: str, role: str, goal: str,
-                            backstory: str, tools: List[str] = None) -> Agent:
+                            backstory: str, tools: List[str] = None,
+                            extra_tools: List = None) -> Agent:
         """Create a dynamic CrewAI agent from role definition.
 
         Args:
@@ -52,6 +53,7 @@ class AgentManager:
             goal: Agent goal
             backstory: System prompt/backstory
             tools: List of allowed tool names
+            extra_tools: Additional CrewAI tool objects to include
 
         Returns:
             CrewAI Agent instance
@@ -61,6 +63,9 @@ class AgentManager:
             for tool_name in tools:
                 if tool_name in self.tool_map:
                     crewai_tool_objects.append(self.tool_map[tool_name])
+        
+        if extra_tools:
+            crewai_tool_objects.extend(extra_tools)
 
         return Agent(
             role=role,

@@ -162,7 +162,7 @@ class AgentInstance:
     
     # Agent state
     status: str = "idle"  # idle, busy, offline, error
-    current_task_id: Optional[str] = None
+    current_task_ids: List[str] = field(default_factory=list)
     
     # Task history
     completed_tasks: List[str] = field(default_factory=list)
@@ -199,18 +199,27 @@ class AgentInstance:
     
     def is_available(self) -> bool:
         """Check if agent is available for new tasks."""
-        return self.status == "idle"
+        if self.status in ("offline", "error"):
+            return False
+        return True
+    
+    def is_idle(self) -> bool:
+        """Check if agent has no active tasks."""
+        return len(self.current_task_ids) == 0
     
     def assign_task(self, task_id: str):
         """Assign a task to this agent."""
+        if task_id not in self.current_task_ids:
+            self.current_task_ids.append(task_id)
         self.status = "busy"
-        self.current_task_id = task_id
         self.last_active = datetime.now().isoformat()
     
     def complete_task(self, task_id: str, success: bool = True):
         """Mark task as completed."""
-        self.current_task_id = None
-        self.status = "idle"
+        if task_id in self.current_task_ids:
+            self.current_task_ids.remove(task_id)
+        if not self.current_task_ids:
+            self.status = "idle"
         self.last_active = datetime.now().isoformat()
         
         if success:
@@ -545,11 +554,20 @@ class AgentRoleManager:
         return [i for i in self.instances.values() if i.role_id == role_id]
     
     def get_available_instances(self, role_id: Optional[str] = None) -> List[AgentInstance]:
-        """Get available (idle) instances."""
+        """Get available instances with capacity."""
         instances = list(self.instances.values())
         if role_id:
             instances = [i for i in instances if i.role_id == role_id]
-        return [i for i in instances if i.is_available()]
+        available = []
+        for i in instances:
+            if i.status in ("offline", "error"):
+                continue
+            role = self.roles.get(i.role_id)
+            if role and role.max_concurrent_tasks is not None:
+                if self._count_active_tasks(i.instance_id) >= role.max_concurrent_tasks:
+                    continue
+            available.append(i)
+        return available
     
     def delete_instance(self, instance_id: str) -> bool:
         """Delete an agent instance."""
@@ -646,20 +664,19 @@ class AgentRoleManager:
         return best_agent
 
     def _count_active_tasks(self, instance_id: str) -> int:
-        """Count active (non-idle) tasks for an agent instance."""
-        count = 0
-        for inst in self.instances.values():
-            if inst.instance_id == instance_id and inst.status == 'busy':
-                count += 1
-        return count
+        """Count active tasks for an agent instance."""
+        inst = self.instances.get(instance_id)
+        if not inst:
+            return 0
+        return len(inst.current_task_ids)
     
     def get_team_summary(self) -> Dict[str, Any]:
         """Get summary of the entire team."""
         return {
             'total_roles': len(self.roles),
             'total_instances': len(self.instances),
-            'available_agents': len(self.get_available_instances()),
-            'busy_agents': len([i for i in self.instances.values() if i.status == 'busy']),
+            'available_agents': len([i for i in self.instances.values() if i.is_idle()]),
+            'busy_agents': len([i for i in self.instances.values() if not i.is_idle()]),
             'roles': [
                 {
                     'role_id': r.role_id,
